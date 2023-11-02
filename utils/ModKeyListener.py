@@ -16,26 +16,31 @@ class ModKeyListener():
     '''
     def __init__(self, * , debugFlag: bool = False):
         # First set up our class variables
-        self.capturedKey = None
         self.keysFound = dict()
+        self.listeners = list()
 
         # And then our consts
-        self.listeners = list()
         self.lInit = lambda lastSid = len(self.listeners): keyboard.hook(self.createGlobalQueueListener(self.keysFound, lastSid))
         self.debug = debugFlag
 
-    def startNewCapture(self) -> None:
+    def startNewCapture(self) -> int:
         """
-            Initializes a new capturing mechanism
+            Initializes a new capturing mechanism and returns the SID of the listening mechanism.
         """
         self.listeners.append(self.lInit())
+        return len(self.listeners)-1
 
     def removeCaptures(self) -> None:
         """
             Removes any listeners currently active.
         """
+        # First use the callback to remove all listeners regardless of state
         for listener in self.listeners:
             keyboard.unhook(listener)
+
+        # then delete all saved keys found
+        for key in self.keysFound.keys():
+            del self.keysFound[key]
 
     def getKeyCombinations(self) -> dict[int, str]:
         """
@@ -43,6 +48,13 @@ class ModKeyListener():
             that recorded them.
         """
         return self.keysFound.copy()
+    
+    def getTotalCaptureCount(self) -> int:
+        """
+            Returns the number of captures that are currently ongoing or have terminated and have
+            saved their resposnes.
+        """
+        return len(self.listeners)
 
     def createGlobalQueueListener(self, kObj: dict, sid: int = 0) -> callable:
         """ 
@@ -61,6 +73,10 @@ class ModKeyListener():
         # We would like to only register valid combinations where only modifiers and a single
         # non-modifier key can be pressed, so we can set that up here.
         isNonMod = lambda keyEvent: not keyboard.is_modifier(keyEvent.scan_code)
+
+        # Since we created a new object, we should also let our class know of its future
+        # availability
+        self.keysFound[sid] = None
 
         def queueModifier(event : keyboard.KeyboardEvent) -> None:
             """
