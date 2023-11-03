@@ -13,6 +13,9 @@ import tkinter as tk
 import tkinter.font as tkFont
 from PIL import ImageTk, Image
 
+# Needed for bindings
+from functools import partial
+
 # Keyboard listener nonsense
 from utils import ModKeyListener
 
@@ -168,6 +171,13 @@ class Timer():
         self.indSelector = indSelector
         self.root = root
 
+        # Holds our next callback's ID to potentially allow us to reset it
+        self.nextCallback = None
+
+        # We can associate callbacks outisde of here since we are constantly updating values
+        self.zeroCallback = None
+        self.calledFlag = False
+
         # And use this to be able to check whether the timer is currently running
         self.intTimer = 0
         self.isRunning = False
@@ -180,6 +190,12 @@ class Timer():
         """
             Starts the timer if it is not already running, and, if it is, simply resets it.
         """
+        # if a process is already under way, we need to remove it so that the timer
+        # properly counts the next second
+        if self.nextCallback is not None:
+            self.root.after_cancel(self.nextCallback)
+            self.isRunning = False
+
         # reset time
         self.intTimer = self.initTime[self.indSelector()]
         self.timLab['fg'] = self.BLACK_COLOR
@@ -188,19 +204,24 @@ class Timer():
         # and make sure the timer is running if it's not
         if not self.isRunning:
             self.isRunning = True
-            self.root.after(1000, self.updateTimer)
+            self.nextCallback = self.root.after(1000, self.updateTimer)
 
     def updateTimer(self) -> None:
         """
             Decrements the timer time by 1 second and updates the timer color 
         """
         # Reset if at 0 and auto-reset is enabled
-        if self.intTimer == 0 and self.autoReset:
-            self.resetTimer()
-            self.root.after(1000, self.updateTimer)
+        if self.intTimer == 0:
+            if self.autoReset:
+                self.resetTimer()
+                self.calledFlag = False
+                self.nextCallback = self.root.after(1000, self.updateTimer)
+        
+            # run our zero callback only once
+            if not self.calledFlag and self.zeroCallback:
+                self.zeroCallback()
+                self.calledFlag = True
             return
-        elif self.intTimer == 0:
-            return # do nothing if autoreset is not enabled
         
         # Otherwise simply decrement and change the label as necessary
         self.intTimer -= 1
@@ -209,34 +230,126 @@ class Timer():
             self.timLab['fg'] = self.RED_COLOR
 
         # And continue running this on a loop
-        self.root.after(1000, self.updateTimer)
+        self.nextCallback = self.root.after(1000, self.updateTimer)
 
-class deviceCounterWidget():
+    def associateZeroTimerCallback(self, callback: callable, *args, **kwargs) -> None:
+        """
+            Allow a timer to have a certain callback executed the moment the timer reaches 0.
+        """
+        self.zeroCallback = lambda : callback(*args, **kwargs)
+
+class DeviceCounterWidget():
     """
         Like the timers, we encapsulate the four dots that represents the devices to make things easier
         for us. This will control the view and also allow us to bind a particular event using a 
         stringvar's trace method as a callback source.
     """
-    def __init__(self):
-        raise NotImplementedError
-    
-    def resetPhase(self):
-        raise NotImplementedError
+    def __init__(self, dotLabels: list[tk.Label], initDeviceCnt: int = 0):
+        # image sources
+        self.dotState = {0 : ImageTk.PhotoImage(Image.open("./resources/emptyDot.png")),
+                         1 : ImageTk.PhotoImage(Image.open("./resources/redDot.png"))}
 
-class phaseImageWidget():
+        # widget intrinsics
+        self.curDeviceCnt = initDeviceCnt
+        self.deviceStates = [1]*self.curDeviceCnt + [0]*(len(dotLabels)-self.curDeviceCnt)
+        self.deviceLabels = dotLabels
+        self.maxDeviceCallback = None
+
+        # finalize using a re-render
+        self.forceRender()
+    
+    def incrementDevices(self):
+        """ Increases the number of active devices by 1. """
+        # Ignore if at max capacity already
+        if self.curDeviceCnt == len(self.deviceStates):
+            return
+        
+        # We can change only the single device that was adjusted
+        self.deviceStates[self.curDeviceCnt] = 1
+        self.deviceLabels[self.curDeviceCnt].configure(image = self.dotState[1])
+        self.curDeviceCnt += 1
+
+        # And run our callback if we just touched max device count
+        if self.curDeviceCnt == len(self.deviceStates):
+            self.maxDeviceCallback()
+    
+    def decrementDevices(self):
+        # Ignore if at minimum capacity already
+        """ Decreases the number of active devices by 1 """
+        if self.curDeviceCnt == 0:
+            return
+        
+        # We can change only the single device that was adjusted
+        self.curDeviceCnt -= 1
+        self.deviceStates[self.curDeviceCnt] = 0
+        self.deviceLabels[self.curDeviceCnt].configure(image = self.dotState[0])
+    
+    def forceRender(self) -> None:
+        """ Forces tkinter to re-render the dot widget in its entirety (including non-changing objects) """
+        for devInd, devLabel in enumerate(self.deviceLabels):
+            devLabel.configure(image = self.dotState[self.deviceStates[devInd]])
+
+    def associateMaxDeviceCallback(self, callback: callable, *args, **kwargs) -> None:
+        """ Once the max number of devices has been reached, executes a callback only once until the device
+         counter has been changed. """
+        self.maxDeviceCallback = lambda : callback(*args,**kwargs)
+
+class PhaseImageWidget():
     """
         This time we control the image that represents the current phase of the boss. This widget is
         entirely controlled by the overlay and this class only servers to encapsulate the methods
         that will be used to alter the state of the widget.
     """
-    def __init__(self):
-        raise NotImplementedError
+    def __init__(self, master, phaseLabel: tk.Label, curPhase: int = 0):
+        # constant for the image itself
+        self.IMG_PADDING = 2
+        self.PHASE_IMGS = ["./resources/2-1.png",
+                           "./resources/2-2.png",
+                           "./resources/2-3.png",
+                           "./resources/2-4.png"]
 
-    def resetPhase(self):
+        # First store our resources for use later
+        self.curPhase = curPhase
+        self.curLabel = phaseLabel
+        self.root = master
+
+        # And load all of our images since we will be using them all eventually
+        self.sources, self.imageRefs = self.loadResources(self.PHASE_IMGS)
+        self.forceRender()
+
+    def loadResources(self, inSrcs: list[str]) -> list[ImageTk.PhotoImage]:
+        """ Takes in a list of image sources and loads all of them into PhotoImage widgets for later use. """
+        sourceImg = list()
+        thumbImg = list()
+
+        for src in inSrcs:
+            sourceImg.append(Image.open(src))
+            phaseThumb = sourceImg[-1].copy()
+            phaseThumb.thumbnail((self.root.width - 2*self.IMG_PADDING, sourceImg[-1].size[1]))
+            thumbImg.append(ImageTk.PhotoImage(phaseThumb))
+        
+        return sourceImg, thumbImg
+
+    def resetPhase(self, newPhase: int) -> None:
         """
             Resets the image to represent the phase that is currently being observed.
         """
-        raise NotImplementedError
+        self.curLabel.configure(image = self.imageRefs[newPhase])
+        self.curPhase = newPhase
+
+    def forceRender(self) -> None:
+        """
+            Forces the widget to re-render the image that represents the current phase.
+            This can be due to the window status changing.
+        """
+        newThumbs = list()
+        for src in self.sources:
+            newThumbs.append(src.copy())
+            newThumbs[-1].thumbnail((self.root.width - 2*self.IMG_PADDING, src.size[1]))
+
+        # And replace all the thumbnails with the new size
+        self.imageRefs = [ImageTk.PhotoImage(thumb) for thumb in newThumbs]
+        self.curLabel.configure(image = self.imageRefs[self.curPhase])
 
 class Overlay(tk.Toplevel):
     """
@@ -252,35 +365,59 @@ class Overlay(tk.Toplevel):
 
         That maps to the following expected input argument values
             (initTime, redTime, autoReset)
-    """
-    ALL_TIMERS = ["device", "laser", "arrow", "fma", "breath", "bomb", "dive"]
-    
+    """    
     def __init__(self, timerArgs: dict, *args, **kwargs):
         # Set some basic options for our new top level window
         tk.Toplevel.__init__(self, *args, **kwargs)
 
         # These are properties of the boss itself that may be modified by our hotkeys later
-        self.curPhaseInd = 0
-        self.deviceStates = ["inactive", "inactive", "inactive", "inactive"]
+        self.observablePhaseInd = tk.IntVar(self, value = 0)
 
         # Then declare some constants that we will use later
-        self.IMG_PADDING = 2
         self.MULT_PHASE_TIMER = {"breath"}
-        self.PHASE_IMGS = ["./resources/2-1.png",
-                           "./resources/2-2.png",
-                           "./resources/2-3.png",
-                           "./resources/2-4.png"]
-        self.dotState = {"inactive" : ImageTk.PhotoImage(Image.open("./resources/emptyDot.png")),
-                         "active" : ImageTk.PhotoImage(Image.open("./resources/redDot.png"))}
         self.timFont = tkFont.Font(self, family = "Helvetica", size = 40)
         self.dscrptFont = tkFont.Font(self, family = "Helvetica", size = 15)
 
         # Set up the UI now and encapsulate returned objects
-        timerRefs, self.imageRefs = self.setupGUI()
+        timerRefs, imageRefs = self.setupGUI()
         self.timObjs = self.encapsulateTimers(timerRefs, timerArgs)
+        self.kalosImgObj = self.encapsulateHeader(imageRefs["phaseRefs"])
+        self.dotImgObj = self.encapsulatePhaseIndicator(imageRefs["dotRefs"])
 
-        for key in self.timObjs.keys():
-            self.timObjs[key].resetTimer()
+        # And now we can associate functionality based on the current phase and timer states
+        self.associatePhaseSetCallback(lambda phaseVal : self.kalosImgObj.resetPhase(phaseVal))
+        self.timObjs["fma"].associateZeroTimerCallback(lambda : self.dotImgObj.incrementDevices())
+        self.timObjs["device"].associateZeroTimerCallback(lambda : self.dotImgObj.incrementDevices())
+        self.dotImgObj.associateMaxDeviceCallback(lambda : self.timObjs["device"].resetTimer())
+
+        # smoke test
+        self.startP2()
+
+    ########################## MAIN FUNCTIONALITIES ###########################
+    def startP2(self, *, devicesToStart: list[str] = ["device", "fma", "bomb"]) -> None:
+        """
+            Starts the main timer functionalities. This force the current phase to 0 (just in case
+            it had been modified using another method), and starts the device, fma, and bomb timers.
+        """
+        self.curPhase = 0
+        for curDevice in devicesToStart:
+            self.timObjs[curDevice].resetTimer()
+
+    ########################## OBJECT ENCAPSULATORS ###########################
+
+    def encapsulatePhaseIndicator(self, dotLabels: list[tk.Label]) -> DeviceCounterWidget:
+        """
+            Encapsulates the four dots as a class to hide the internal functionality of the
+            dot swapping.
+        """
+        return DeviceCounterWidget(dotLabels)
+
+    def encapsulateHeader(self, curImageLabel: tk.Label) -> PhaseImageWidget:
+        """
+            Encapsulates the header as a class that has methods that won't clutter our program
+            space.
+        """
+        return PhaseImageWidget(self, curImageLabel, self.curPhase)
 
     def encapsulateTimers(self, allTimers: dict[str, tuple[tk.StringVar, tk.Label]], timerArgs: dict) -> dict[str, Timer]:
         """
@@ -292,11 +429,13 @@ class Overlay(tk.Toplevel):
         for key in allTimers.keys():
             objTimers[key] = Timer(self, allTimers[key][0], allTimers[key][1], 
                                    timerArgs[key]["initTime"], timerArgs[key]["redTime"], timerArgs[key]["autoReset"],
-                                   indSelector = (lambda : self.getCurrentPhase()) if key in self.MULT_PHASE_TIMER else (lambda : 0))
+                                   indSelector = (lambda : self.curPhase) if key in self.MULT_PHASE_TIMER else (lambda : 0))
             
         return objTimers
 
-    def setupGUI(self) -> None:
+    ############################ GUI SETUP ###################################
+
+    def setupGUI(self) -> tuple[dict[str]]:
         """
             The main function that sets up all UI elements and encapsulates all functional return values 
             along with their potentially bound functions.
@@ -340,21 +479,17 @@ class Overlay(tk.Toplevel):
                 {"phaseRefs" : imageObject,
                  "dotRefs" : dotObjects})
 
-    def setupPhaseImageLabel(self) -> tuple[ImageTk.PhotoImage, tk.Label]:
+    def setupPhaseImageLabel(self) -> tk.Label:
         """
             Sets up the phase display for kalos. Returns the PhotoImage object that is rendered by
             the label.
         """
         hpFrame = tk.Frame(self)
-        curPhaseImg = Image.open(self.PHASE_IMGS[self.curPhaseInd]) # need to save image to view
-        curPhaseImgThumb = curPhaseImg.copy()
-        curPhaseImgThumb.thumbnail((self.width - 2*self.IMG_PADDING, curPhaseImg.size[1]))
-        frameModImg = ImageTk.PhotoImage(curPhaseImgThumb)
-        hpImageLab = tk.Label(hpFrame, image = frameModImg)
+        hpImageLab = tk.Label(hpFrame, image = None)
         hpImageLab.pack(fill = "both", expand = True)
         hpFrame.grid(column = 0, columnspan = 4, row = 0)
 
-        return frameModImg, hpImageLab
+        return hpImageLab
 
     def setupDevicesRow(self) -> tuple[dict[str, tuple[tk.StringVar, tk.Label]], list[tk.Label]]:
         """
@@ -367,8 +502,8 @@ class Overlay(tk.Toplevel):
         curDeviceLabel.pack(side = "top", fill = "x", expand = True)
         descriptionFrame = tk.Frame(deviceFrame)
         deviceDots = list()
-        for devInd in range(4):
-            deviceDots.append(tk.Label(descriptionFrame, image = self.dotState[self.deviceStates[devInd]]))
+        for _ in range(4):
+            deviceDots.append(tk.Label(descriptionFrame, image = None))
             deviceDots[-1].pack(side = "left", fill = "y", expand = False)
         devDescriptLabel = tk.Label(descriptionFrame, text = "Devices", font = self.dscrptFont)
         devDescriptLabel.pack(side = "right", fill = "y", expand = True)
@@ -458,10 +593,7 @@ class Overlay(tk.Toplevel):
             self.width, self.height = event.width, event.height
 
             # resize image on resize
-            self.curPhaseImgThumb = self.curPhaseImg.copy()
-            self.curPhaseImgThumb.thumbnail((self.width - 2*self.IMG_PADDING, self.curPhaseImg.size[1]))
-            self.frameModImg = ImageTk.PhotoImage(self.curPhaseImgThumb)
-            self.hpImage.configure(image = self.frameModImg)
+            # TODO: Use the kalos context to resize the image on resizing
 
             # We can do the same with text potentially
             # TODO: Try text adjustment via ratio differences
@@ -494,9 +626,22 @@ class Overlay(tk.Toplevel):
             elif type(child) is tk.Label:
                 child.config(bg=color)
 
-    def getCurrentPhase(self) -> int:
+    ########################## PROPERTIES AND BINDINGS #############################
+
+    @property
+    def curPhase(self) -> int:
         """ Function for retrieving the current phase. (Used in passing current phase values to callbacks.) """
-        return self.curPhaseInd
+        return self.observablePhaseInd.get()
+    
+    @curPhase.setter
+    def curPhase(self, pVal) -> None:
+        """ Setter for the current phase. """
+        self.observablePhaseInd.set(pVal)
+
+    def associatePhaseSetCallback(self, callback: callable, *args, **kwargs):
+        """ Associates a callback whenever the phase property is changed. """
+        self.observablePhaseInd.trace_add('write', lambda var, index, mode, val = self.curPhase: callback(val, *args, **kwargs))
+    
 
 if __name__ == "__main__":
     window = App()
