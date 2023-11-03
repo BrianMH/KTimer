@@ -13,7 +13,7 @@ import tkinter as tk
 import tkinter.font as tkFont
 from PIL import ImageTk, Image
 
-# Keyboard nonsense
+# Keyboard listener nonsense
 from utils import ModKeyListener
 
 class App(tk.Tk):
@@ -33,8 +33,9 @@ class App(tk.Tk):
                         "Clear Device", "Reset Breath", "Reset Dive", "Reset Laser", "Reset Arrows",
                         "Reset Bombs", "Force FMA"]
         self.expectedArgs = ["Device Timer", "Laser Timer", "Arrow Timer",
-                             "FMA Timer", "Breath Timer", "Bomb Timer",
+                             "FMA Timer", "Breath Timers", "Bomb Timer",
                              "Dive Timer"]
+        self.expArgsDefs = ["60", "15", "15", "150", "60, 45, 20, 20", "10", "20"]
 
         # Initialize some class variables that will be passed to our overlay eventually
         self.storedHotkeys = {argName:None for argName in self.expectedHotkeys}
@@ -49,7 +50,7 @@ class App(tk.Tk):
         self.startOverlayButton.bind("<Button-1>", self.executeOverlay)
 
         # We will also need our key listener to be able to determine what keys we want to hotkey
-        self.listenerClass = ModKeyListener.ModKeyListener(debug = True)
+        self.listenerClass = ModKeyListener.ModKeyListener(debugFlag = True)
 
     def recordHotkey(self, topLevelName: str) -> None:
         """
@@ -84,7 +85,7 @@ class App(tk.Tk):
         for argInd, argName in enumerate(self.expectedArgs):
             curLabel = tk.Label(self.defaultsFrame, text = argName+":", font = self.nhFont)
             curLabel.grid(column = 0, columnspan = 1, row = 1 + argInd, rowspan = 1, ipadx = 4)
-            self.entryElems[self.expectedArgs[argInd]] = tk.StringVar(self.defaultsFrame)
+            self.entryElems[self.expectedArgs[argInd]] = tk.StringVar(self.defaultsFrame, value = self.expArgsDefs[argInd])
             curEntry = tk.Entry(self.defaultsFrame, textvariable = self.entryElems[self.expectedArgs[argInd]], font = self.nhFont,
                                     width = 10)
             curEntry.grid(column = 1, columnspan = 1, row = 1 + argInd, rowspan = 1, ipadx = 4)
@@ -112,9 +113,33 @@ class App(tk.Tk):
         """
             Starts the overlay along with all the relevant arguments passed to the window.
         """
-        self.overlay = Overlay()
+        # first we need to collect the arguments that were given to the window to pass into the overlay
+        expectedArgOrder = ["device", "laser", "arrow", "fma", "breath", "bomb", "dive"]
+        initTimeArgs = {argName:[int(val) for val in self.entryElems[self.expectedArgs[argInd]].get().split(",")] for argInd, argName in enumerate(expectedArgOrder)}
+
+        # And combine that with some pre-specified defaults to package into a full argument sequence
+        redTimeArgs = {"device": 10, 
+                      "laser": 5,
+                      "arrow": 5,
+                      "fma": 20,
+                      "breath": 5,
+                      "bomb": 5,
+                      "dive": 5}
+        autoResetArgs = {"device": True,
+                         "laser": True,
+                         "arrow": True,
+                         "bomb": True}
+        fullArgs = {argName:{"initTime": initTimeArgs[argName],
+                             "redTime": redTimeArgs[argName],
+                             "autoReset": autoResetArgs.get(argName, False)} for argName in expectedArgOrder}
+
+        # And then pass these collected values to the overlay
+        self.overlay = Overlay(fullArgs)
 
     def changeColor(self, color, container=None):
+        """
+            Revursively changes the background colors of all widgets within a given container.
+        """
         if container is None:
             container = self  # set to root window
         container.config(bg=color)
@@ -124,22 +149,115 @@ class App(tk.Tk):
             elif type(child) is tk.Label:
                 child.config(bg=color)
 
+class Timer():
+    """
+        Creates a pseudo-control panel for timer widgets. Encapsulates them so that properties can be accessed
+        easily and also gives them an optional string ID which can be used to identify specific timers.
+
+        This method can take into account multiple times, but in order to do so will need to be provided a
+        function that takes in no arguments and returns the appropriate indexer at any given moment.
+    """
+    def __init__(self, root: tk.Tk, timerStr: tk.StringVar, timerLab: tk.Label, initTime: list[int], redTime: int, autoReset: bool,
+                 indSelector: callable):
+        # Save our values which will be used for the timer processes
+        self.timString = timerStr
+        self.timLab = timerLab
+        self.initTime = initTime
+        self.redTime = redTime
+        self.autoReset = autoReset
+        self.indSelector = indSelector
+        self.root = root
+
+        # And use this to be able to check whether the timer is currently running
+        self.intTimer = 0
+        self.isRunning = False
+
+        # And some class constants to be used later
+        self.RED_COLOR = "red"
+        self.BLACK_COLOR = "black"
+
+    def resetTimer(self) -> None:
+        """
+            Starts the timer if it is not already running, and, if it is, simply resets it.
+        """
+        # reset time
+        self.intTimer = self.initTime[self.indSelector()]
+        self.timLab['fg'] = self.BLACK_COLOR
+        self.timString.set("{:>2}".format(self.intTimer))
+
+        # and make sure the timer is running if it's not
+        if not self.isRunning:
+            self.isRunning = True
+            self.root.after(1000, self.updateTimer)
+
+    def updateTimer(self) -> None:
+        """
+            Decrements the timer time by 1 second and updates the timer color 
+        """
+        # Reset if at 0 and auto-reset is enabled
+        if self.intTimer == 0 and self.autoReset:
+            self.resetTimer()
+            self.root.after(1000, self.updateTimer)
+            return
+        elif self.intTimer == 0:
+            return # do nothing if autoreset is not enabled
+        
+        # Otherwise simply decrement and change the label as necessary
+        self.intTimer -= 1
+        self.timString.set("{:>2}".format(self.intTimer))
+        if self.intTimer <= self.redTime:
+            self.timLab['fg'] = self.RED_COLOR
+
+        # And continue running this on a loop
+        self.root.after(1000, self.updateTimer)
+
+class deviceCounterWidget():
+    """
+        Like the timers, we encapsulate the four dots that represents the devices to make things easier
+        for us. This will control the view and also allow us to bind a particular event using a 
+        stringvar's trace method as a callback source.
+    """
+    def __init__(self):
+        raise NotImplementedError
+    
+    def resetPhase(self):
+        raise NotImplementedError
+
+class phaseImageWidget():
+    """
+        This time we control the image that represents the current phase of the boss. This widget is
+        entirely controlled by the overlay and this class only servers to encapsulate the methods
+        that will be used to alter the state of the widget.
+    """
+    def __init__(self):
+        raise NotImplementedError
+
+    def resetPhase(self):
+        """
+            Resets the image to represent the phase that is currently being observed.
+        """
+        raise NotImplementedError
+
 class Overlay(tk.Toplevel):
     """
         Controls the kalos timer overlay. This contains all visuals regarding the timers and the
         phase controller. All keybinds are handled through external callbacks that affect the overlay
         (Note that the callbacks are registered to a keyboard listener, not through the tk event loop).
 
-        This also has contains all the controls for the timers.
+        This also has contains all the controls for the timers and expects the user inputs to be
+        passed in from the main window for processing.
+
+        The timerArgs argument expects a dictionary that maps each one of the known timer types: 
+            ["device", "laser", "arrow", "fma", "breath", "bomb", "dive"]
+
+        That maps to the following expected input argument values
+            (initTime, redTime, autoReset)
     """
-    def __init__(self, *args, **kwargs):
+    ALL_TIMERS = ["device", "laser", "arrow", "fma", "breath", "bomb", "dive"]
+    
+    def __init__(self, timerArgs: dict, *args, **kwargs):
         # Set some basic options for our new top level window
         tk.Toplevel.__init__(self, *args, **kwargs)
-        self.geometry("400x335")
-        self.width, self.height = 400, 335
-        self['bg'] = "#999999"
-        self.wm_attributes("-topmost", True)
-        self.overrideredirect(True) # prevents the WM from creating its decorations on this window
 
         # These are properties of the boss itself that may be modified by our hotkeys later
         self.curPhaseInd = 0
@@ -147,6 +265,7 @@ class Overlay(tk.Toplevel):
 
         # Then declare some constants that we will use later
         self.IMG_PADDING = 2
+        self.MULT_PHASE_TIMER = {"breath"}
         self.PHASE_IMGS = ["./resources/2-1.png",
                            "./resources/2-2.png",
                            "./resources/2-3.png",
@@ -156,95 +275,162 @@ class Overlay(tk.Toplevel):
         self.timFont = tkFont.Font(self, family = "Helvetica", size = 40)
         self.dscrptFont = tkFont.Font(self, family = "Helvetica", size = 15)
 
+        # Set up the UI now and encapsulate returned objects
+        timerRefs, self.imageRefs = self.setupGUI()
+        self.timObjs = self.encapsulateTimers(timerRefs, timerArgs)
+
+        for key in self.timObjs.keys():
+            self.timObjs[key].resetTimer()
+
+    def encapsulateTimers(self, allTimers: dict[str, tuple[tk.StringVar, tk.Label]], timerArgs: dict) -> dict[str, Timer]:
+        """
+            Takes in our timers as tuples of the string time representations and labels along with the
+            passed in user input specifications and creates an encapsulated timer that is much easier
+            to move around the class.
+        """
+        objTimers = dict()
+        for key in allTimers.keys():
+            objTimers[key] = Timer(self, allTimers[key][0], allTimers[key][1], 
+                                   timerArgs[key]["initTime"], timerArgs[key]["redTime"], timerArgs[key]["autoReset"],
+                                   indSelector = (lambda : self.getCurrentPhase()) if key in self.MULT_PHASE_TIMER else (lambda : 0))
+            
+        return objTimers
+
+    def setupGUI(self) -> None:
+        """
+            The main function that sets up all UI elements and encapsulates all functional return values 
+            along with their potentially bound functions.
+        """
+        ######  Window Properties ########
+        self.geometry("400x335")
+        self.width, self.height = 400, 335
+        self['bg'] = "#999999"
+        self.wm_attributes("-topmost", True)
+        self.overrideredirect(True) # prevents the WM from creating its decorations on this window
+
         ######  Widget organization ########
         # First set up our hp meter on top with the divider image
-        self.setupPhaseImageLabel()
+        imageObject = self.setupPhaseImageLabel()
 
         # Then we want to set up our next row which includes the device timer and the laser/arrow timers
-        self.setupDevicesRow()
+        laTimers, dotObjects = self.setupDevicesRow()
 
         # Next row includes the FMA and breath timers
-        self.setupFMABreathRow()
+        fbTimers = self.setupFMABreathRow()
 
         # And finally we can deal with the bomb and dive timers
-        self.setupBombDiveRow()
+        bdTimers = self.setupBombDiveRow()
 
         # Set up some proper colors so they are consistent across widgets
         self.changeColor(self['bg'])
 
         # Bind specific actions to certain functions
-        self.hpImage.bind("<ButtonPress-1>", self.startMove)
-        self.hpImage.bind("<ButtonRelease-1>", self.stopMove)
-        self.hpImage.bind("<B1-Motion>", self.moveWindow)
+        self.bind("<ButtonPress-1>", self.startMove)
+        self.bind("<ButtonRelease-1>", self.stopMove)
+        self.bind("<B1-Motion>", self.moveWindow)
         self.bind("<Configure>", self.resize)
 
-    def setupPhaseImageLabel(self) -> None:
-        self.hpFrame = tk.Frame(self)
-        self.curPhaseImg = Image.open(self.PHASE_IMGS[self.curPhaseInd]) # need to save image to view
-        self.curPhaseImgThumb = self.curPhaseImg.copy()
-        self.curPhaseImgThumb.thumbnail((self.width - 2*self.IMG_PADDING, self.curPhaseImg.size[1]))
-        self.frameModImg = ImageTk.PhotoImage(self.curPhaseImgThumb)
-        self.hpImage = tk.Label(self.hpFrame, image = self.frameModImg)
-        self.hpImage.pack(fill = "both", expand = True)
-        self.hpFrame.grid(column = 0, columnspan = 4, row = 0)
+        return ({"device": laTimers["device"],
+                "laser": laTimers["laser"],
+                "arrow": laTimers["arrow"],
+                "fma": fbTimers["fma"],
+                "breath": fbTimers["breath"],
+                "bomb": bdTimers["bomb"],
+                "dive": bdTimers["dive"]},
+                {"phaseRefs" : imageObject,
+                 "dotRefs" : dotObjects})
 
-    def setupDevicesRow(self) -> None:
-        self.deviceFrame = tk.Frame(self, relief = "groove", borderwidth = 1)
-        self.curDeviceTime = tk.StringVar(self.deviceFrame, value = "--")
-        self.curDeviceLabel = tk.Label(self.deviceFrame, textvariable = self.curDeviceTime, font = self.timFont)
-        self.curDeviceLabel.pack(side = "top", fill = "x", expand = True)
-        self.descriptionFrame = tk.Frame(self.deviceFrame)
-        self.deviceDots = list()
+    def setupPhaseImageLabel(self) -> tuple[ImageTk.PhotoImage, tk.Label]:
+        """
+            Sets up the phase display for kalos. Returns the PhotoImage object that is rendered by
+            the label.
+        """
+        hpFrame = tk.Frame(self)
+        curPhaseImg = Image.open(self.PHASE_IMGS[self.curPhaseInd]) # need to save image to view
+        curPhaseImgThumb = curPhaseImg.copy()
+        curPhaseImgThumb.thumbnail((self.width - 2*self.IMG_PADDING, curPhaseImg.size[1]))
+        frameModImg = ImageTk.PhotoImage(curPhaseImgThumb)
+        hpImageLab = tk.Label(hpFrame, image = frameModImg)
+        hpImageLab.pack(fill = "both", expand = True)
+        hpFrame.grid(column = 0, columnspan = 4, row = 0)
+
+        return frameModImg, hpImageLab
+
+    def setupDevicesRow(self) -> tuple[dict[str, tuple[tk.StringVar, tk.Label]], list[tk.Label]]:
+        """
+            Sets up the device row and returns both the elements used to keep the timers
+            and the widgets used to represents the devices.
+        """
+        deviceFrame = tk.Frame(self, relief = "groove", borderwidth = 1)
+        curDeviceTime = tk.StringVar(deviceFrame, value = "--")
+        curDeviceLabel = tk.Label(deviceFrame, textvariable = curDeviceTime, font = self.timFont)
+        curDeviceLabel.pack(side = "top", fill = "x", expand = True)
+        descriptionFrame = tk.Frame(deviceFrame)
+        deviceDots = list()
         for devInd in range(4):
-            self.deviceDots.append(tk.Label(self.descriptionFrame, image = self.dotState[self.deviceStates[devInd]]))
-            self.deviceDots[-1].pack(side = "left", fill = "y", expand = False)
-        self.devDescriptLabel = tk.Label(self.descriptionFrame, text = "Devices", font = self.dscrptFont)
-        self.devDescriptLabel.pack(side = "right", fill = "y", expand = True)
-        self.descriptionFrame.pack(side = "bottom", fill = "x", expand = True)
+            deviceDots.append(tk.Label(descriptionFrame, image = self.dotState[self.deviceStates[devInd]]))
+            deviceDots[-1].pack(side = "left", fill = "y", expand = False)
+        devDescriptLabel = tk.Label(descriptionFrame, text = "Devices", font = self.dscrptFont)
+        devDescriptLabel.pack(side = "right", fill = "y", expand = True)
+        descriptionFrame.pack(side = "bottom", fill = "x", expand = True)
 
-        self.deviceFrame.grid(column = 0, columnspan = 3, row = 1, sticky = "WE")
+        deviceFrame.grid(column = 0, columnspan = 3, row = 1, sticky = "WE")
 
         # laser/arrow timers
-        self.laFrame = tk.Frame(self, relief = "groove", borderwidth = 1) # main frame
+        laFrame = tk.Frame(self, relief = "groove", borderwidth = 1) # main frame
 
-        self.laserFrame = tk.Frame(self.laFrame, ) # laser partition
-        self.curLaserTime = tk.StringVar(self.laserFrame, value = "--")
-        self.curLaserLab = tk.Label(self.laserFrame, textvariable = self.curLaserTime, font = self.timFont)
-        self.curLaserLab.pack(side = "top", fill = "y", expand = True)
-        self.lDescriptLabel = tk.Label(self.laserFrame, text = "Lasers", font = self.dscrptFont)
-        self.lDescriptLabel.pack(side = "bottom", fill = "x", expand= True)
-        self.laserFrame.pack(side = "left", fill = "both", expand = True, ipadx = 5)
+        laserFrame = tk.Frame(laFrame) # laser partition
+        curLaserTime = tk.StringVar(laserFrame, value = "--")
+        curLaserLab = tk.Label(laserFrame, textvariable = curLaserTime, font = self.timFont)
+        curLaserLab.pack(side = "top", fill = "y", expand = True)
+        lDescriptLabel = tk.Label(laserFrame, text = "Lasers", font = self.dscrptFont)
+        lDescriptLabel.pack(side = "bottom", fill = "x", expand= True)
+        laserFrame.pack(side = "left", fill = "both", expand = True, ipadx = 5)
 
-        self.arrowFrame = tk.Frame(self.laFrame) # arrow partition
-        self.curArrowTime = tk.StringVar(self.laFrame, value = "--")
-        self.curArrowLab = tk.Label(self.arrowFrame, textvariable = self.curArrowTime, font = self.timFont)
-        self.curArrowLab.pack(side = "top", fill = "y", expand = True)
-        self.aDescriptLabel = tk.Label(self.arrowFrame, text = "Arrows", font = self.dscrptFont)
-        self.aDescriptLabel.pack(side = "bottom", fill = "x", expand = True)
-        self.arrowFrame.pack(side = "right", fill = "both", expand = True, ipadx = 5)
+        arrowFrame = tk.Frame(laFrame) # arrow partition
+        curArrowTime = tk.StringVar(laFrame, value = "--")
+        curArrowLab = tk.Label(arrowFrame, textvariable = curArrowTime, font = self.timFont)
+        curArrowLab.pack(side = "top", fill = "y", expand = True)
+        aDescriptLabel = tk.Label(arrowFrame, text = "Arrows", font = self.dscrptFont)
+        aDescriptLabel.pack(side = "bottom", fill = "x", expand = True)
+        arrowFrame.pack(side = "right", fill = "both", expand = True, ipadx = 5)
 
-        self.laFrame.grid(column = 3, columnspan = 1, row = 1, sticky = "WE")
+        laFrame.grid(column = 3, columnspan = 1, row = 1, sticky = "WE")
 
-    def setupFMABreathRow(self) -> None:
+        return ({"device": (curDeviceTime, curDeviceLabel),
+                 "laser" : (curLaserTime, curLaserLab), 
+                 "arrow" : (curArrowTime, curArrowLab)},
+                deviceDots)
+
+    def setupFMABreathRow(self) -> dict[str,tuple[tk.StringVar, tk.Label]]:
+        """
+            Sets up the third row and returns the respective timers and labels.
+        """
         # first deal with FMA part
-        self.fmaFrame = tk.Frame(self, relief = "groove", borderwidth = 1)
-        self.curFMATime = tk.StringVar(self.fmaFrame, value = "--")
-        self.curFMALab = tk.Label(self.fmaFrame, textvariable = self.curFMATime, font = self.timFont)
-        self.curFMALab.pack(side = "top", fill = "y", expand = True)
-        self.fmaDescriptLabel = tk.Label(self.fmaFrame, text = "FMA", font = self.dscrptFont)
-        self.fmaDescriptLabel.pack(side = "bottom", expand = True)
-        self.fmaFrame.grid(column = 0, columnspan = 2, row = 2, sticky = "WE")
+        fmaFrame = tk.Frame(self, relief = "groove", borderwidth = 1)
+        curFMATime = tk.StringVar(fmaFrame, value = "--")
+        curFMALab = tk.Label(fmaFrame, textvariable = curFMATime, font = self.timFont)
+        curFMALab.pack(side = "top", fill = "y", expand = True)
+        fmaDescriptLabel = tk.Label(fmaFrame, text = "FMA", font = self.dscrptFont)
+        fmaDescriptLabel.pack(side = "bottom", expand = True)
+        fmaFrame.grid(column = 0, columnspan = 2, row = 2, sticky = "WE")
 
         # And then the breath part
-        self.breathFrame = tk.Frame(self, relief = "groove", borderwidth = 1)
-        self.curBreathTime = tk.StringVar(self.breathFrame, value = "--")
-        self.curBreathLab = tk.Label(self.breathFrame, textvariable = self.curBreathTime, font = self.timFont)
-        self.curBreathLab.pack(side = "top", fill = "y", expand = True)
-        self.breathDescriptLabel = tk.Label(self.breathFrame, text = "Breath", font = self.dscrptFont)
-        self.breathDescriptLabel.pack(side = "bottom", expand = True)
-        self.breathFrame.grid(column = 2, columnspan = 2, row = 2, sticky = "WE")
+        breathFrame = tk.Frame(self, relief = "groove", borderwidth = 1)
+        curBreathTime = tk.StringVar(breathFrame, value = "--")
+        curBreathLab = tk.Label(breathFrame, textvariable = curBreathTime, font = self.timFont)
+        curBreathLab.pack(side = "top", fill = "y", expand = True)
+        breathDescriptLabel = tk.Label(breathFrame, text = "Breath", font = self.dscrptFont)
+        breathDescriptLabel.pack(side = "bottom", expand = True)
+        breathFrame.grid(column = 2, columnspan = 2, row = 2, sticky = "WE")
 
-    def setupBombDiveRow(self) -> None:
+        return {"fma" : (curFMATime, curFMALab), 
+                "breath" : (curBreathTime, curBreathLab)}
+
+    def setupBombDiveRow(self) -> dict[str, tuple[tk.StringVar, tk.Label]]:
+        """
+            Finally, sets up the fourth row and returns the respective timers and labels
+        """
         # like before deal with the bomb part
         self.bombFrame = tk.Frame(self, relief = "groove", borderwidth = 1)
         self.curBombTime = tk.StringVar(self.bombFrame, value = "--")
@@ -262,6 +448,9 @@ class Overlay(tk.Toplevel):
         self.diveDescriptLabel = tk.Label(self.diveFrame, text = "Dive", font = self.dscrptFont)
         self.diveDescriptLabel.pack(side = "bottom", expand = True)
         self.diveFrame.grid(column = 2, columnspan = 2, row = 3, sticky = "WE")
+
+        return {"bomb" : (self.curBombTime, self.curBombLab), 
+                "dive" : (self.curDiveTime, self.curDiveLab)}
 
     def resize(self, event):
         if(event.widget == self and
@@ -293,6 +482,9 @@ class Overlay(tk.Toplevel):
         self.geometry(f"+{x}+{y}")
 
     def changeColor(self, color, container=None):
+        """
+            Revursively changes the background colors of all widgets within a given container.
+        """
         if container is None:
             container = self  # set to root window
         container.config(bg=color)
@@ -301,6 +493,10 @@ class Overlay(tk.Toplevel):
                 self.changeColor(color, child)
             elif type(child) is tk.Label:
                 child.config(bg=color)
+
+    def getCurrentPhase(self) -> int:
+        """ Function for retrieving the current phase. (Used in passing current phase values to callbacks.) """
+        return self.curPhaseInd
 
 if __name__ == "__main__":
     window = App()
