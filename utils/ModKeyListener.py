@@ -1,5 +1,5 @@
 """
-ModKeyLisetener.py
+ModKeyListener.py
 
 A class that is able to manage the recordings of various listeners. Keep in mind that these listeners do not have any
 timers set to them, so the moment a new listener is created it will run until it records any number of modifiers plus
@@ -18,10 +18,19 @@ class ModKeyListener():
         # First set up our class variables
         self.keysFound = dict()
         self.listeners = list()
+        self.hotkeyListeners = dict()
 
         # And then our consts
-        self.lInit = lambda lastSid = len(self.listeners): keyboard.hook(self.createGlobalQueueListener(self.keysFound, lastSid))
+        self.lInit = lambda : keyboard.hook(self.createGlobalQueueListener(self.keysFound, len(self.listeners)))
         self.debug = debugFlag
+
+    def checkCaptureStatus(self, sid: int) -> bool:
+        """ Reports whether or not the capture has terminated (written a value to the keysFound var) """
+        return self.keysFound[sid] is not None
+    
+    def getCapturedKey(self, sid: int) -> str:
+        """ Returns a string representation of the captured key config """
+        return self.keysFound[sid]
 
     def startNewCapture(self) -> int:
         """
@@ -39,8 +48,11 @@ class ModKeyListener():
             keyboard.unhook(listener)
 
         # then delete all saved keys found
-        for key in self.keysFound.keys():
+        for key in list(self.keysFound.keys()):
             del self.keysFound[key]
+
+        # And clean the listener list
+        self.listeners = list()
 
     def getKeyCombinations(self) -> dict[int, str]:
         """
@@ -106,6 +118,24 @@ class ModKeyListener():
                     modSet.add(event.name)
 
         return queueModifier
+    
+    def createHotkeyCallback(self, hotkey: str, callback: callable) -> None:
+        """
+            Creates a global callback for a given hotkey and adds the callback to the class
+            for potential removal.
+        """
+        self.hotkeyListeners[hotkey.lower()] = (keyboard.add_hotkey(hotkey.lower(), callback = callback))
+
+    def removeHotkeyListeners(self) -> None:
+        """
+            Removes all hotkey listeners that are currently active.
+        """
+        # destroy the listener
+        for listener in self.hotkeyListeners.values():
+            keyboard.remove_hotkey(listener)
+
+        # And erase all references
+        self.hotKeyListeners = dict()
 
 # smoke test
 if __name__ == "__main__":

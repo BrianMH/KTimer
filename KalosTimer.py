@@ -7,11 +7,14 @@
 
     Just keep in mind that while numpad selections could have been valid, it's not worth considering because
     MS itself doesn't quite act properly when it comes to keypad inputs.
+
+    This particular file contains all the main widget placement entries. It does not touch any of the images
+    (as that is handled solely by the widget containers)
 """
 # GUI stuff
 import tkinter as tk
 import tkinter.font as tkFont
-from PIL import ImageTk, Image
+from utils.WidgetContainers import Timer, PhaseImageWidget, DeviceCounterWidget
 
 # Needed for bindings
 from functools import partial
@@ -27,6 +30,7 @@ class App(tk.Tk):
     def __init__(self, * , defalultBG = "#999999"):
         # Initialize our window
         tk.Tk.__init__(self)
+        self.title("Kalos Timer")
         self["bg"] = defalultBG
         self.nhFont = tkFont.Font(self, family = "Helvetica", size = 12)
         self.headerFont = tkFont.Font(self, family = "Helvetica", size = 30)
@@ -34,14 +38,14 @@ class App(tk.Tk):
         # Initialize our class constants
         self.expectedHotkeys = ["Start Timers", "Begin Check", "Fail Check", "10s Bind", "15s Bind",
                         "Clear Device", "Reset Breath", "Reset Dive", "Reset Laser", "Reset Arrows",
-                        "Reset Bombs", "Force FMA"]
+                        "Reset Bombs", "Reset FMA", "Add Device"]
         self.expectedArgs = ["Device Timer", "Laser Timer", "Arrow Timer",
                              "FMA Timer", "Breath Timers", "Bomb Timer",
                              "Dive Timer"]
         self.expArgsDefs = ["60", "15", "15", "150", "60, 45, 20, 20", "10", "20"]
 
         # Initialize some class variables that will be passed to our overlay eventually
-        self.storedHotkeys = {argName:None for argName in self.expectedHotkeys}
+        self.storedHotkeys = {argName:tk.StringVar(self, value = "       Set       ") for argName in self.expectedHotkeys}
 
         # Creat the GUI now
         self.generateGUI()
@@ -53,7 +57,11 @@ class App(tk.Tk):
         self.startOverlayButton.bind("<Button-1>", self.executeOverlay)
 
         # We will also need our key listener to be able to determine what keys we want to hotkey
-        self.listenerClass = ModKeyListener.ModKeyListener(debugFlag = True)
+        self.listenerClass = ModKeyListener.ModKeyListener()
+
+        # And keep track of whether or not our overlay is currently active
+        self.overlay = None
+        self.overlayActive = False
 
     def recordHotkey(self, topLevelName: str) -> None:
         """
@@ -61,12 +69,37 @@ class App(tk.Tk):
 
             The key is stored inside the class in self.storedHotkeys[topLevelName].
         """
-        tempHKWindow = tk.Toplevel(self, bg = self["bg"])
-        tk.Label(tempHKWindow, text = "Setting Hotkey for ...".format(topLevelName), font = self.nhFont).pack(side = "top")
+        # temporarily disable access to older window while setting new key
+        tempHKWindow = tk.Toplevel(self)
+        tempHKWindow.grab_set()
+        tempHKWindow.title("Setting Hotkey for {}".format(topLevelName))
+
+        # create a destruction functor for it
+        def termWindow(curWindow : tk.Toplevel):
+            curWindow.grab_release()
+            curWindow.destroy()
+
+        captureFrame = tk.Frame(tempHKWindow)
+        tk.Label(captureFrame, text = "Captured Key: ", font = self.nhFont, pady = 8, padx = 50).pack(side = "left")
+        keyVar = tk.StringVar(captureFrame, value = "...")
+        tk.Label(captureFrame, textvariable = keyVar, font = self.nhFont, padx = 50).pack(side = "right")
+        captureFrame.pack(side = "top")
+        doneButton = tk.Button(tempHKWindow, text = "Done", font = self.nhFont, command = lambda : termWindow(tempHKWindow), state = "disabled")
+        doneButton.pack(side = "bottom")
+        self.changeColor(self["bg"], container = tempHKWindow)
 
         # start a new listener which will send a callback to set the hotkey for this window
         listenerSID = self.listenerClass.startNewCapture()
-        
+        while not self.listenerClass.checkCaptureStatus(listenerSID):
+            self.update() # work on queue while listener hasn't captured anything
+
+        # Once captured, present the value captured and re-enable the close button
+        doneButton.configure(state = "normal")
+        keyVar.set(self.listenerClass.getCapturedKey(listenerSID))
+        self.storedHotkeys[topLevelName].set(keyVar.get())
+
+        # And destroy our listener so it doesn't take up space
+        self.listenerClass.removeCaptures()
 
     def generateGUI(self) -> None:
         """
@@ -101,8 +134,8 @@ class App(tk.Tk):
         for argInd, argName in enumerate(self.expectedHotkeys):
             curLabel = tk.Label(self.hotkeyFrame, text = argName, font = self.nhFont)
             curLabel.grid(column = 0, columnspan = 1, row = 1 + argInd, rowspan = 1, ipadx = 4)
-            self.hkButtons[self.expectedHotkeys[argInd]] = tk.Button(self.hotkeyFrame, text = "Set", font = self.nhFont, 
-                                                                     command = lambda : self.recordHotkey(self.expectedHotkeys[argInd]))
+            self.hkButtons[self.expectedHotkeys[argInd]] = tk.Button(self.hotkeyFrame, textvariable = self.storedHotkeys[argName], font = self.nhFont, 
+                                                                     command = lambda curElem = argInd: self.recordHotkey(self.expectedHotkeys[curElem]))
             self.hkButtons[self.expectedHotkeys[argInd]].grid(column = 1, columnspan = 1, row = 1 + argInd, rowspan = 1, ipadx = 4)
         self.hotkeyFrame.grid(column = 1, row = 1, sticky = "E")
 
@@ -138,6 +171,60 @@ class App(tk.Tk):
 
         # And then pass these collected values to the overlay
         self.overlay = Overlay(fullArgs)
+        self.overlayActive = True
+        self.overlay.grab_set()
+
+        # And finally we can use any keybinds that the user has set at this point
+        self.startExecutingKeybinds(self.overlay)
+
+    def startExecutingKeybinds(self, curOverlay : "Overlay") -> None:
+        """
+            Sets up the keyboard listener to now interface with the overlay functionalities.
+        """
+        def functionSelector(settingName: str) -> callable:
+            """
+                Maps particular known setting name attributes to their respective functions.
+            """
+            match settingName:
+                case 'Start Timers':
+                    return curOverlay.startP2
+                case 'Begin Check':
+                    return curOverlay.startPhaseCheck
+                case 'Fail Check':
+                    return curOverlay.failPhaseCheck
+                case '10s Bind':
+                    return partial(curOverlay.addBindTimer, 10)
+                case '15s Bind':
+                    return partial(curOverlay.addBindTimer, 15)
+                case 'Clear Device':
+                    return curOverlay.cleanseDevice
+                case 'Reset Breath':
+                    return curOverlay.startBreath
+                case 'Reset Dive':
+                    return curOverlay.startDive
+                case 'Reset Laser':
+                    return curOverlay.startLaser
+                case 'Reset Arrows':
+                    return curOverlay.startArrow
+                case 'Reset Bombs':
+                    return curOverlay.startBombs
+                case 'Reset FMA':
+                    return curOverlay.startFMA
+                case 'Add Device':
+                    return curOverlay.addDevice
+                case _:
+                    raise NotImplementedError
+
+        for settingName, hotkey in self.storedHotkeys.items():
+            if hotkey.get()[0] != " ": # Means we have a valid hotkey to bind
+                self.listenerClass.createHotkeyCallback(hotkey.get(), functionSelector(settingName))
+
+        # And finally we can bind the window termination as well
+        def terminateOverlay():
+            self.overlay.destroy()
+            self.listenerClass.removeHotkeyListeners()
+
+        self.listenerClass.createHotkeyCallback('Esc', terminateOverlay)
 
     def changeColor(self, color, container=None):
         """
@@ -151,205 +238,6 @@ class App(tk.Tk):
                 self.changeColor(color, child)
             elif type(child) is tk.Label:
                 child.config(bg=color)
-
-class Timer():
-    """
-        Creates a pseudo-control panel for timer widgets. Encapsulates them so that properties can be accessed
-        easily and also gives them an optional string ID which can be used to identify specific timers.
-
-        This method can take into account multiple times, but in order to do so will need to be provided a
-        function that takes in no arguments and returns the appropriate indexer at any given moment.
-    """
-    def __init__(self, root: tk.Tk, timerStr: tk.StringVar, timerLab: tk.Label, initTime: list[int], redTime: int, autoReset: bool,
-                 indSelector: callable):
-        # Save our values which will be used for the timer processes
-        self.timString = timerStr
-        self.timLab = timerLab
-        self.initTime = initTime
-        self.redTime = redTime
-        self.autoReset = autoReset
-        self.indSelector = indSelector
-        self.root = root
-
-        # Holds our next callback's ID to potentially allow us to reset it
-        self.nextCallback = None
-
-        # We can associate callbacks outisde of here since we are constantly updating values
-        self.zeroCallback = None
-        self.calledFlag = False
-
-        # And use this to be able to check whether the timer is currently running
-        self.intTimer = 0
-        self.isRunning = False
-
-        # And some class constants to be used later
-        self.RED_COLOR = "red"
-        self.BLACK_COLOR = "black"
-
-    def resetTimer(self) -> None:
-        """
-            Starts the timer if it is not already running, and, if it is, simply resets it.
-        """
-        # if a process is already under way, we need to remove it so that the timer
-        # properly counts the next second
-        if self.nextCallback is not None:
-            self.root.after_cancel(self.nextCallback)
-            self.isRunning = False
-
-        # reset time
-        self.intTimer = self.initTime[self.indSelector()]
-        self.timLab['fg'] = self.BLACK_COLOR
-        self.timString.set("{:>2}".format(self.intTimer))
-
-        # and make sure the timer is running if it's not
-        if not self.isRunning:
-            self.isRunning = True
-            self.nextCallback = self.root.after(1000, self.updateTimer)
-
-    def updateTimer(self) -> None:
-        """
-            Decrements the timer time by 1 second and updates the timer color 
-        """
-        # Reset if at 0 and auto-reset is enabled
-        if self.intTimer == 0:
-            if self.autoReset:
-                self.resetTimer()
-                self.calledFlag = False
-                self.nextCallback = self.root.after(1000, self.updateTimer)
-        
-            # run our zero callback only once
-            if not self.calledFlag and self.zeroCallback:
-                self.zeroCallback()
-                self.calledFlag = True
-            return
-        
-        # Otherwise simply decrement and change the label as necessary
-        self.intTimer -= 1
-        self.timString.set("{:>2}".format(self.intTimer))
-        if self.intTimer <= self.redTime:
-            self.timLab['fg'] = self.RED_COLOR
-
-        # And continue running this on a loop
-        self.nextCallback = self.root.after(1000, self.updateTimer)
-
-    def associateZeroTimerCallback(self, callback: callable, *args, **kwargs) -> None:
-        """
-            Allow a timer to have a certain callback executed the moment the timer reaches 0.
-        """
-        self.zeroCallback = lambda : callback(*args, **kwargs)
-
-class DeviceCounterWidget():
-    """
-        Like the timers, we encapsulate the four dots that represents the devices to make things easier
-        for us. This will control the view and also allow us to bind a particular event using a 
-        stringvar's trace method as a callback source.
-    """
-    def __init__(self, dotLabels: list[tk.Label], initDeviceCnt: int = 0):
-        # image sources
-        self.dotState = {0 : ImageTk.PhotoImage(Image.open("./resources/emptyDot.png")),
-                         1 : ImageTk.PhotoImage(Image.open("./resources/redDot.png"))}
-
-        # widget intrinsics
-        self.curDeviceCnt = initDeviceCnt
-        self.deviceStates = [1]*self.curDeviceCnt + [0]*(len(dotLabels)-self.curDeviceCnt)
-        self.deviceLabels = dotLabels
-        self.maxDeviceCallback = None
-
-        # finalize using a re-render
-        self.forceRender()
-    
-    def incrementDevices(self):
-        """ Increases the number of active devices by 1. """
-        # Ignore if at max capacity already
-        if self.curDeviceCnt == len(self.deviceStates):
-            return
-        
-        # We can change only the single device that was adjusted
-        self.deviceStates[self.curDeviceCnt] = 1
-        self.deviceLabels[self.curDeviceCnt].configure(image = self.dotState[1])
-        self.curDeviceCnt += 1
-
-        # And run our callback if we just touched max device count
-        if self.curDeviceCnt == len(self.deviceStates):
-            self.maxDeviceCallback()
-    
-    def decrementDevices(self):
-        # Ignore if at minimum capacity already
-        """ Decreases the number of active devices by 1 """
-        if self.curDeviceCnt == 0:
-            return
-        
-        # We can change only the single device that was adjusted
-        self.curDeviceCnt -= 1
-        self.deviceStates[self.curDeviceCnt] = 0
-        self.deviceLabels[self.curDeviceCnt].configure(image = self.dotState[0])
-    
-    def forceRender(self) -> None:
-        """ Forces tkinter to re-render the dot widget in its entirety (including non-changing objects) """
-        for devInd, devLabel in enumerate(self.deviceLabels):
-            devLabel.configure(image = self.dotState[self.deviceStates[devInd]])
-
-    def associateMaxDeviceCallback(self, callback: callable, *args, **kwargs) -> None:
-        """ Once the max number of devices has been reached, executes a callback only once until the device
-         counter has been changed. """
-        self.maxDeviceCallback = lambda : callback(*args,**kwargs)
-
-class PhaseImageWidget():
-    """
-        This time we control the image that represents the current phase of the boss. This widget is
-        entirely controlled by the overlay and this class only servers to encapsulate the methods
-        that will be used to alter the state of the widget.
-    """
-    def __init__(self, master, phaseLabel: tk.Label, curPhase: int = 0):
-        # constant for the image itself
-        self.IMG_PADDING = 2
-        self.PHASE_IMGS = ["./resources/2-1.png",
-                           "./resources/2-2.png",
-                           "./resources/2-3.png",
-                           "./resources/2-4.png"]
-
-        # First store our resources for use later
-        self.curPhase = curPhase
-        self.curLabel = phaseLabel
-        self.root = master
-
-        # And load all of our images since we will be using them all eventually
-        self.sources, self.imageRefs = self.loadResources(self.PHASE_IMGS)
-        self.forceRender()
-
-    def loadResources(self, inSrcs: list[str]) -> list[ImageTk.PhotoImage]:
-        """ Takes in a list of image sources and loads all of them into PhotoImage widgets for later use. """
-        sourceImg = list()
-        thumbImg = list()
-
-        for src in inSrcs:
-            sourceImg.append(Image.open(src))
-            phaseThumb = sourceImg[-1].copy()
-            phaseThumb.thumbnail((self.root.width - 2*self.IMG_PADDING, sourceImg[-1].size[1]))
-            thumbImg.append(ImageTk.PhotoImage(phaseThumb))
-        
-        return sourceImg, thumbImg
-
-    def resetPhase(self, newPhase: int) -> None:
-        """
-            Resets the image to represent the phase that is currently being observed.
-        """
-        self.curLabel.configure(image = self.imageRefs[newPhase])
-        self.curPhase = newPhase
-
-    def forceRender(self) -> None:
-        """
-            Forces the widget to re-render the image that represents the current phase.
-            This can be due to the window status changing.
-        """
-        newThumbs = list()
-        for src in self.sources:
-            newThumbs.append(src.copy())
-            newThumbs[-1].thumbnail((self.root.width - 2*self.IMG_PADDING, src.size[1]))
-
-        # And replace all the thumbnails with the new size
-        self.imageRefs = [ImageTk.PhotoImage(thumb) for thumb in newThumbs]
-        self.curLabel.configure(image = self.imageRefs[self.curPhase])
 
 class Overlay(tk.Toplevel):
     """
@@ -385,13 +273,10 @@ class Overlay(tk.Toplevel):
         self.dotImgObj = self.encapsulatePhaseIndicator(imageRefs["dotRefs"])
 
         # And now we can associate functionality based on the current phase and timer states
-        self.associatePhaseSetCallback(lambda phaseVal : self.kalosImgObj.resetPhase(phaseVal))
-        self.timObjs["fma"].associateZeroTimerCallback(lambda : self.dotImgObj.incrementDevices())
-        self.timObjs["device"].associateZeroTimerCallback(lambda : self.dotImgObj.incrementDevices())
-        self.dotImgObj.associateMaxDeviceCallback(lambda : self.timObjs["device"].resetTimer())
-
-        # smoke test
-        self.startP2()
+        self.associatePhaseSetCallback(self.kalosImgObj.resetPhase)
+        self.timObjs["fma"].associateZeroTimerCallback(self.dotImgObj.incrementDevices)
+        self.timObjs["device"].associateZeroTimerCallback(self.dotImgObj.incrementDevices)
+        self.dotImgObj.associateMaxDeviceCallback(self.timObjs["device"].swapToWarning, self.timObjs["device"].swapToNormal)
 
     ########################## MAIN FUNCTIONALITIES ###########################
     def startP2(self, *, devicesToStart: list[str] = ["device", "fma", "bomb"]) -> None:
@@ -402,6 +287,70 @@ class Overlay(tk.Toplevel):
         self.curPhase = 0
         for curDevice in devicesToStart:
             self.timObjs[curDevice].resetTimer()
+
+    def startBreath(self) -> None:
+        """ Starts/Resets the breath timer """
+        self.timObjs["breath"].resetTimer()
+
+    def startFMA(self) -> None:
+        """ Starts/Resets the fma timer """
+        self.timObjs["fma"].resetTimer()
+
+    def startLaser(self) -> None: 
+        """ Starts/Resets the laser timer """
+        self.timObjs["laser"].resetTimer()
+
+    def startArrow(self) -> None:
+        """ Starts/Resets the arrow timer """
+        self.timObjs["arrow"].resetTimer()
+
+    def startDive(self) -> None:
+        """ Starts/Resets the dive timer """
+        self.timObjs["dive"].resetTimer()
+
+    def startBreath(self) -> None:
+        """ Starts/Resets the breath timer """
+        self.timObjs["breath"].resetTimer()
+    
+    def startBombs(self) -> None:
+        """ Starts / Resets the bomb timer """
+        self.timObjs["bomb"].resetTimer()
+
+    def incrementPhase(self) -> None:
+        """ Increments the current phase of the boss by 1"""
+        self.curPhase = self.curPhase + 1
+
+    def decrementPhase(self) -> None:
+        """ Decrements the current phase of the boss by 1 (mostly for debugging) """
+        self.curPhase = self.curPhase - 1
+
+    def cleanseDevice(self) -> None:
+        """ Performs a device cleansing (reduces device count by 1) """
+        self.dotImgObj.decrementDevices()
+
+    def addDevice(self) -> None:
+        """ Adds a new device. (Should not generally be used unless fma timer is waaay off) """
+        self.dotImgObj.incrementDevices()
+
+    def addBindTimer(self, bindTime: int) -> None:
+        """ Increments the FMA timer by a pre-specified amount. """
+        self.timObjs["fma"].addTime(bindTime)
+
+    def startPhaseCheck(self, *, affectedDevices = ["device", "fma"]) -> None:
+        """ Starts the phase Kalos phase check. """
+        for curDevice in affectedDevices:
+            if self.timObjs[curDevice].isLocked():
+                return
+            self.timObjs[curDevice].applyExtraTime(50)
+        self.incrementPhase()
+
+    def failPhaseCheck(self, *, affectedDevices = ["device", "fma"]) -> None:
+        """ Forces the current Kalos phase check to fail (thereby forcing previous timers to be active again) """
+        for curDevice in affectedDevices:
+            if not self.timObjs[curDevice].isLocked():
+                return
+            self.timObjs[curDevice].removeExtraTime()
+        self.decrementPhase()
 
     ########################## OBJECT ENCAPSULATORS ###########################
 
@@ -446,6 +395,7 @@ class Overlay(tk.Toplevel):
         self['bg'] = "#999999"
         self.wm_attributes("-topmost", True)
         self.overrideredirect(True) # prevents the WM from creating its decorations on this window
+        self.x, self.y = 0, 0 # used to define window adjustments
 
         ######  Widget organization ########
         # First set up our hp meter on top with the divider image
@@ -634,14 +584,13 @@ class Overlay(tk.Toplevel):
         return self.observablePhaseInd.get()
     
     @curPhase.setter
-    def curPhase(self, pVal) -> None:
+    def curPhase(self, pVal: int) -> None:
         """ Setter for the current phase. """
         self.observablePhaseInd.set(pVal)
 
     def associatePhaseSetCallback(self, callback: callable, *args, **kwargs):
         """ Associates a callback whenever the phase property is changed. """
-        self.observablePhaseInd.trace_add('write', lambda var, index, mode, val = self.curPhase: callback(val, *args, **kwargs))
-    
+        self.observablePhaseInd.trace_add('write', lambda var, index, mode : callback(self.curPhase, *args, **kwargs))
 
 if __name__ == "__main__":
     window = App()
